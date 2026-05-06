@@ -1,0 +1,97 @@
+## 🌟 主要创新 (Key Contributions)
+1. **架构革新 (Architecture)**: 引入 InceptionTime 多尺度并行卷积，替换原有的 1D-ResNet，极大提升了极限单导联场景下宽窄心电波形（如 QRS 波与 T 波）的特征榨取能力。
+2. **因果去偏 (Causal De-biasing)**: 继承并优化了后门调整（Backdoor Adjustment）与因果混淆字典，有效隔离并过滤了不同设备/医院（PTB-XL vs. MIT-BIH）特有的环境底噪。
+3. **软标签蒸馏 (Soft-label Distillation)**: 抛弃传统的硬标签与物理 DTW 匹配，利用教师模型生成概率软标签进行无监督跨域联合训练，有效规避了“负迁移”与罕见病分布坍塌。
+
+## 📊 性能指标 (Results on PTB-XL Fold 10)
+在完全未见过的纯净测试集（Fold 10）上，本项目的演进指标如下：
+
+| 模型架构 | 训练策略 | 测试集 Macro-AUC | 备注 |
+| :--- | :--- | :---: | :--- |
+| **Original Causal ECGNet** | 仅 PTB-XL (Baseline) | **93.06%** | 控制组基线 |
+| **Original Causal ECGNet** | PTB-XL + MIT 软标签 | **93.22%** | 验证了软标签蒸馏的有效性 |
+| **Inception-Causal ECGNet** | PTB-XL + MIT 软标签 | **94.39% 🏆** | **终极模型，绝对提升 1.33%** |
+
+conda activate ecgnet
+python train.pyhenduo
+
+phase1_extract_templates.py                        提取PTB-XL数据集的模板
+phase2_mit_pseudo_labeling.py                      读取MIT并切片和DTW匹配与打伪标签           
+                                                   在进行 DTW 计算时，代码会临时将双方波形降采样到 100Hz（1000个点）。
+                                                   这保留了波形的宏观病理形态（足够用于相似度匹配），同时将计算量缩小了 25 倍！
+                                                   匹配出最佳标签后，最终保存下来的依然是原汁原味的高清 500Hz 信号。
+
+train_mit.py                                       单独使用打好标签的MIT数据集训练，8:2 划分
+verify_mit_labels.py                               统计并打印这 8280 条 MIT 数据段中，12 个类别分别被分配了多少条。绘制波形图：为每一个被分配到数据的类别，随机画出 3 个波形段（10秒/500Hz），拼接成一张大图保存下来，让你用肉眼亲自“审查” DTW 的匹配质量。 
+
+使用InceptionTime 这个方案打标签
+train_teacher.py                                   利用单导联训练模型
+phase3_teacher_pseudo_labeling.py                  打标签
+verify_teacher_labels.py                           查看统计并打印这 8280 条 MIT 数据段中，12 个类别分别被分配了多少条。绘制波形图：为每一个被分配到数据的类别，随机画出 3 个波形段（10秒/500Hz），拼接成一张大图保存下来，让你用肉眼亲自“审查” DTW 的匹配质量。
+train_student_causal.py                            用打好标签的MIT数据集给Casual ECGNet
+
+合并两个数据集测试
+step1_baseline.py                                  步骤 1：工作内容：只用 PTB-XL 的 Fold 1-8（单导联）训练，Fold 9 验证。建立一个没有任何外部数据干扰的“纯净基线模型”。
+step2_3_mixed_train.py                             步骤 2：构建混合数据集 (Mixed Dataset)。在代码里写一个新的 Dataset，把 PTB-XL Fold 1-8 和生成的 mit_teacher_labeled.npy 暴力拼接成一个巨大的训练池。
+                                                   步骤 3：混合训练。用这个庞大的混合数据集去训练你的 SingleLeadCausalECGNet。
+step4_compare_test.py                              步骤 4：严格的同分布测试。用 PTB-XL 的 Fold 9 挑选最优 Epoch，最后在 **PTB-XL Fold 10（纯净测试集）**上进行最终测试，对比 Baseline 是否提升。
+
+模型架构调整：
+1、用 InceptionBlock1D 替换掉原模型里的 ResNetBackboneSingle。
+model_inception_causal.py
+train_mixed_inception_causal.py                    python train_mixed_inception_causal.py  
+把它拉到完全未见过的纯净测试集（Fold 10）上           python step6_inception_ultimate_test.py
+
+2、只用宏观分支
+models_ablation.py                                这个文件包含了你需要的两个单分支模型：一个是基于原始 ResNet 的，另一个是基于咱们的 Inception 的。
+train_ablation_resnet.py                          ResNet 单分支的训练脚本 (第一步)，新建 train_ablation_resnet.py。在这个脚本中，前向传播不再返回 pred_upper 和 pred_lower，而是直接返回单一的 pred，因此损失函数也变得极其精简。
+测试集  step8_ablation_test.py                    
+
+train_ablation_inception.py                       Inception 单分支的训练脚本 (第二步)
+
+
+数据分布统计脚本 step9_dataset_statistics.py
+去除 SR 标签，只看剩下 11 种真实心脏病变的分类结果    step10_strict_eval_no_sr.py
+
+step12_ablation_single_scale.py                   卷积层仅使用一个卷积核 k=20（之前是10 20 40）    
+
+去除MIT的SR标签
+step13_train_filtered_mit.py
+
+去除后端的“因果混淆字典”和“交叉注意力融合”
+step14_ablation_no_causal.py
+
+靶向增广数据统计脚本 step15_filtered_dataset_statistics.py
+
+调整阈值 step16_adaptive_threshold_train.py
+    SR 正常心律）：阈值设为 1.1（永远无法触发入场，必须靠其他病理带入）。
+    高频常见病（> 500例，如 AFIB, STACH, SARRH, SBRAD）：阈值0.4，确保注入高质量特征。
+    中频病变（100~500例，如 PACE, SVARR）：阈值放宽至 0.3。
+    极罕见病（< 100例，如 BIGU, AFLT, SVTAC, PSVT, TRIGU）：阈值极度放宽至 0.15 。
+把面板的“统计门槛”和“入场门槛”对齐：step17_aligned_stats_train.py
+
+对比雷达图：_radar_chart.py
+
+仅模型改进：仅使用PTB-XL数据集导联Ⅱ
+chapter2_model_and_train.py
+chapter2_combined_improvements.py
+
+第二章对比试验：
+PTB-XL 官方 Benchmark 开源库：
+    FCN：basic_conv1d.py
+    ResNet-1D (具体为 xresnet1d101)：xresnet1d.py
+    InceptionTime1D；inception1d.py
+时间序列深度学习：pip install tsai
+    BiLSTM：
+    MiniRocket：
+    XceptionTime:
+Stanford-ResNet-34 (1D)；
+ECG-ViT (Vision Transformer for 1D Signal)
+
+
+第二章：原始数据集与整合好的数据集对比，ptb-xl、mit、合并三种情况，可8个模型做对比
+    使用PTB-XL数据集导联Ⅱ：
+        Causal ECGNet:
+    使用MIT单导联：
+    整合两个数据集：
+     
